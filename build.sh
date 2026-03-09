@@ -82,9 +82,5 @@ done
 OUTPUT="$BUILD_DIR/libphptoro_ext.a"
 echo "  AR libphptoro_ext.a"
 ar rcs "$OUTPUT" "${OBJECTS[@]}"
-
-# Copy output to php/<target>/lib/ for convenience
-cp "$OUTPUT" "$PHP_DIR/lib/libphptoro_ext.a"
-
 echo "Done: $OUTPUT"
 echo "  $(wc -c < "$OUTPUT" | tr -d ' ') bytes"
