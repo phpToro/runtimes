@@ -1,13 +1,17 @@
 /*
- * phptoro_ext.c — Minimal PHP extension for phpToro.
+ * phptoro_ext.c — PHP extension for phpToro.
  *
- * Exposes a single function to PHP:
+ * Exposes two functions to PHP:
  *
  *   phptoro_native_call(string $namespace, string $method, string $args_json): mixed
+ *   phptoro_respond(mixed $data): bool
  *
- * This is the ONLY bridge between PHP and native code. The PHP framework
- * wraps this in a developer-friendly API (e.g. phptoro('state')->get('key')),
- * but underneath it all goes through this single C function.
+ * phptoro_native_call() is the ONLY bridge between PHP and native code.
+ * The PHP framework wraps this in a developer-friendly API
+ * (e.g. phptoro('state')->get('key')), but underneath it all goes
+ * through this single C function.
+ *
+ * phptoro_respond() sets the structured JSON response, bypassing echo/print.
  *
  * The host (Swift/Kotlin) registers a native handler via
  * phptoro_set_native_handler() before PHP init. All routing, plugin
@@ -16,6 +20,7 @@
 
 #include "php.h"
 #include "ext/json/php_json.h"
+#include "zend_smart_str.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -76,10 +81,53 @@ PHP_FUNCTION(phptoro_native_call)
     free(result);
 }
 
+/* ── phptoro_respond() ─────────────────────────────────────────────────── */
+
+/*
+ * Set the structured response directly, bypassing echo/print.
+ *
+ * The SAPI stores this JSON-encoded payload separately from output.
+ * When both exist, the structured response takes priority and any
+ * echo/print output is forwarded as debug info.
+ *
+ * Usage in entry.php:
+ *   phptoro_respond($responseArray);
+ */
+
+/* Forward declaration — defined in phptoro_sapi.c */
+void phptoro_set_response(const uint8_t *data, size_t len);
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_phptoro_respond, 0, 0, 1)
+    ZEND_ARG_INFO(0, data)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(phptoro_respond)
+{
+    zval *data;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* JSON-encode the data */
+    smart_str buf = {0};
+    php_json_encode(&buf, data, PHP_JSON_UNESCAPED_UNICODE | PHP_JSON_INVALID_UTF8_SUBSTITUTE);
+    smart_str_0(&buf);
+
+    if (buf.s) {
+        phptoro_set_response((const uint8_t *)ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+        smart_str_free(&buf);
+        RETURN_TRUE;
+    }
+
+    RETURN_FALSE;
+}
+
 /* ── Function table ────────────────────────────────────────────────────── */
 
 static const zend_function_entry phptoro_functions[] = {
     PHP_FE(phptoro_native_call, arginfo_phptoro_native_call)
+    PHP_FE(phptoro_respond, arginfo_phptoro_respond)
     PHP_FE_END
 };
 

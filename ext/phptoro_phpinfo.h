@@ -4,7 +4,7 @@
 #include "php.h"
 
 /*
- * phptoro_phpinfo_install() — call AFTER php_module_startup().
+ * phptoro_phpinfo_install() — call AFTER RiphtSapi::instance().
  *
  * Replaces the built-in phpinfo() handler with a branded version
  * that uses phpToro CSS theming.

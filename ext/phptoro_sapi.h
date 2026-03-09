@@ -5,7 +5,8 @@
 #include <stddef.h>
 
 /* Initialize the PHP engine. Call once at startup. Returns 0 on success.
- * data_dir: writable path for sessions, uploads, tmp files (app-private). */
+ * data_dir: writable path for sessions, uploads, tmp files (app-private).
+ * Plugins must be registered via phptoro_register_plugin() before calling this. */
 int phptoro_php_init(const char *data_dir);
 
 /* Shutdown the PHP engine. */
@@ -29,8 +30,10 @@ typedef struct {
 
 typedef struct {
     int status;
-    uint8_t *body;
+    uint8_t *body;        /* Response body (from phptoro_respond or echo) */
     size_t body_len;
+    uint8_t *debug;       /* Stray echo/print output (NULL if none) */
+    size_t debug_len;
     char **header_names;
     char **header_values;
     int header_count;

@@ -1,0 +1,86 @@
+name: Build PHP Runtimes
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_version:
+        description: 'Full PHP version (e.g. 8.5.3)'
+        required: true
+        default: '8.5.3'
+        type: string
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Determine next build number
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PHP="${{ inputs.php_version }}"
+          LATEST=$(gh release list --repo ${{ github.repository }} --json tagName --jq \
+            "[.[] | select(.tagName | startswith(\"v${PHP}-\")) | .tagName | ltrimstr(\"v${PHP}-\") | tonumber] | max // 0")
+          NEXT=$((LATEST + 1))
+          echo "tag=v${PHP}-${NEXT}" >> $GITHUB_OUTPUT
+          echo "Next release: v${PHP}-${NEXT}"
+
+  build:
+    needs: resolve
+    strategy:
+      matrix:
+        include:
+          - target: macos-arm64
+            runner: macos-15
+          - target: ios-arm64
+            runner: macos-15
+          - target: ios-arm64-sim
+            runner: macos-15
+          - target: android-arm64
+            runner: macos-15
+          - target: android-x86_64
+            runner: macos-15
+
+    runs-on: ${{ matrix.runner }}
+    name: PHP ${{ inputs.php_version }} — ${{ matrix.target }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          chmod +x build.sh
+          ./build.sh --php=${{ inputs.php_version }} --target=${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ inputs.php_version }}-${{ matrix.target }}
+          path: output/php-${{ inputs.php_version }}-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.resolve.outputs.tag }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" artifacts/**/*.tar.gz \
+            --title "$TAG" \
+            --notes "PHP ${{ inputs.php_version }} runtimes (build ${TAG##*-})"

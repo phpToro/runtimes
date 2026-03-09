@@ -1,5 +1,7 @@
 /*
  * phpToro SAPI — Embeds PHP via the C embed API.
+ *
+ * This replaces the entire Rust ripht-php-sapi crate with ~250 lines of C.
  */
 
 #include "php.h"
@@ -34,11 +36,15 @@ typedef struct {
     const char **req_header_values;
     int         req_header_count;
 
-    /* Response output */
+    /* Response output (captures echo/print — treated as debug output) */
     uint8_t *output;
     size_t   output_len;
     size_t   output_cap;
     int      status_code;
+
+    /* Structured response (set via phptoro_respond(), takes priority) */
+    uint8_t *response;
+    size_t   response_len;
 
     /* Response headers */
     char  **header_names;
@@ -181,7 +187,7 @@ static void cb_register_server_variables(zval *arr) {
     REG("DOCUMENT_ROOT",     ctx->document_root);
     REG("CONTENT_TYPE",      ctx->content_type);
     REG("HTTP_COOKIE",       ctx->cookie_data);
-    REG("SERVER_SOFTWARE",   "phpToro/1.0");
+    REG("SERVER_SOFTWARE",   "phpToro/0.1");
     REG("SERVER_PROTOCOL",   "HTTP/1.1");
     REG("GATEWAY_INTERFACE", "CGI/1.1");
     REG("SERVER_NAME",       "localhost");
@@ -205,18 +211,23 @@ static void cb_register_server_variables(zval *arr) {
     snprintf(rtf, sizeof(rtf), "%.6f", ctx->request_time);
     php_register_variable_safe("REQUEST_TIME_FLOAT", rtf, strlen(rtf), arr);
 
-    /* Forward incoming HTTP headers as HTTP_* variables */
+    /* Forward incoming HTTP headers as HTTP_* variables.
+     * Convention: uppercase name, hyphens → underscores, prefix HTTP_.
+     * Content-Type and Content-Length are NOT prefixed (already set above). */
     for (int i = 0; i < ctx->req_header_count; i++) {
         const char *name = ctx->req_header_names[i];
         const char *value = ctx->req_header_values[i];
         if (!name || !value) continue;
 
+        /* Skip Content-Type and Content-Length (already handled) */
         if (strcasecmp(name, "Content-Type") == 0) continue;
         if (strcasecmp(name, "Content-Length") == 0) continue;
+        /* Skip Cookie (handled by read_cookies callback) */
         if (strcasecmp(name, "Cookie") == 0) continue;
 
+        /* Build HTTP_<UPPERCASE_NAME> */
         size_t nlen = strlen(name);
-        char *key = malloc(5 + nlen + 1);
+        char *key = malloc(5 + nlen + 1); /* "HTTP_" + name + NUL */
         memcpy(key, "HTTP_", 5);
         for (size_t j = 0; j < nlen; j++) {
             char c = name[j];
@@ -267,6 +278,7 @@ static const char ini_base[] =
     "opcache.enable=0\n"
     "opcache.enable_cli=0\n";
 
+/* Dynamic INI string (built at init with app-specific paths) */
 static char *ini_entries_dynamic = NULL;
 
 /* ── SAPI name storage ──────────────────────────────────────────── */
@@ -276,18 +288,41 @@ static char sapi_pretty_name[] = "phpToro Embedded";
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
+/* ── phptoro_respond() support ────────────────────────────────────── */
+
+/*
+ * Called from phptoro_respond() in phptoro_ext.c.
+ * Stores a structured response that takes priority over echo/print output.
+ */
+void phptoro_set_response(const uint8_t *data, size_t len) {
+    request_ctx *ctx = SG(server_context);
+    if (!ctx || !data || len == 0) return;
+
+    /* Free previous response if any */
+    if (ctx->response) free(ctx->response);
+
+    ctx->response = malloc(len);
+    if (ctx->response) {
+        memcpy(ctx->response, data, len);
+        ctx->response_len = len;
+    }
+}
+
 static int initialized = 0;
 
 int phptoro_php_init(const char *data_dir) {
     if (initialized) return 0;
 
+    /* Build dynamic INI with app-private paths */
     const char *dir = data_dir ? data_dir : "/tmp";
 
+    /* Build session and tmp subdirectories */
     char sessions_dir[1024];
     char tmp_dir[1024];
     snprintf(sessions_dir, sizeof(sessions_dir), "%s/sessions", dir);
     snprintf(tmp_dir, sizeof(tmp_dir), "%s/tmp", dir);
 
+    /* Create directories (ignore errors if they exist) */
     mkdir(sessions_dir, 0700);
     mkdir(tmp_dir, 0700);
 
@@ -297,8 +332,9 @@ int phptoro_php_init(const char *data_dir) {
         "%s"
         "session.save_path=%s\n"
         "upload_tmp_dir=%s\n"
-        "sys_temp_dir=%s\n",
-        ini_base, sessions_dir, tmp_dir, tmp_dir);
+        "sys_temp_dir=%s\n"
+        "opcache.lockfile_path=%s\n",
+        ini_base, sessions_dir, tmp_dir, tmp_dir, tmp_dir);
 
     sapi_module.name        = sapi_name;
     sapi_module.pretty_name = sapi_pretty_name;
@@ -325,11 +361,13 @@ int phptoro_php_init(const char *data_dir) {
     sapi_module.treat_data          = cb_treat_data;
     sapi_module.input_filter        = php_default_input_filter;
 
-    sapi_module.php_ini_ignore     = 0;
+    sapi_module.php_ini_ignore     = 1;
     sapi_module.php_ini_ignore_cwd = 1;
-    sapi_module.ini_entries        = ini_entries_dynamic;
 
     sapi_startup(&sapi_module);
+
+    /* Set ini_entries AFTER sapi_startup() — it resets ini_entries to NULL */
+    sapi_module.ini_entries = ini_entries_dynamic;
 
     if (php_module_startup(&sapi_module, &phptoro_module_entry) == FAILURE) {
         sapi_shutdown();
@@ -357,6 +395,7 @@ int phptoro_php_execute(const phptoro_request *req, phptoro_response *resp) {
     if (!initialized || !req || !resp) return -1;
     memset(resp, 0, sizeof(*resp));
 
+    /* Build request context */
     request_ctx ctx;
     memset(&ctx, 0, sizeof(ctx));
 
@@ -368,6 +407,7 @@ int phptoro_php_execute(const phptoro_request *req, phptoro_response *resp) {
     ctx.query_string  = qmark ? strdup(qmark + 1) : strdup("");
     ctx.request_uri   = uri;
 
+    /* SCRIPT_NAME = path portion only (no query string) */
     if (qmark) {
         ctx.script_name = strndup(uri, qmark - uri);
     } else {
@@ -381,14 +421,17 @@ int phptoro_php_execute(const phptoro_request *req, phptoro_response *resp) {
     ctx.script_filename = req->script_path;
     ctx.document_root   = req->document_root;
 
+    /* Incoming HTTP headers for HTTP_* forwarding */
     ctx.req_header_names  = req->header_names;
     ctx.req_header_values = req->header_values;
     ctx.req_header_count  = req->header_count;
 
+    /* Capture request start time */
     struct timeval tv;
     gettimeofday(&tv, NULL);
     ctx.request_time = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
 
+    /* Install context */
     SG(server_context)               = &ctx;
     SG(request_info).request_method  = ctx.method;
     SG(request_info).content_type    = ctx.content_type;
@@ -396,6 +439,7 @@ int phptoro_php_execute(const phptoro_request *req, phptoro_response *resp) {
     SG(request_info).query_string    = ctx.query_string;
     SG(sapi_headers).http_response_code = 200;
 
+    /* Request startup */
     if (php_request_startup() == FAILURE) {
         php_request_shutdown(NULL);
         SG(server_context) = NULL;
@@ -405,22 +449,42 @@ int phptoro_php_execute(const phptoro_request *req, phptoro_response *resp) {
         return -1;
     }
 
+    /* Execute script */
     zend_file_handle fh;
     zend_stream_init_filename(&fh, req->script_path);
     fh.primary_script = 1;
     php_execute_script(&fh);
     zend_destroy_file_handle(&fh);
 
+    /* Request shutdown */
     SG(post_read) = 1;
     php_request_shutdown(NULL);
 
+    /* Copy results (caller takes ownership).
+     * If phptoro_respond() was called, use that as the body.
+     * Any echo/print output is stray debug output — forwarded separately. */
     resp->status        = ctx.status_code;
-    resp->body          = ctx.output;
-    resp->body_len      = ctx.output_len;
     resp->header_names  = ctx.header_names;
     resp->header_values = ctx.header_values;
     resp->header_count  = ctx.header_count;
 
+    if (ctx.response && ctx.response_len > 0) {
+        /* Structured response takes priority */
+        resp->body     = ctx.response;
+        resp->body_len = ctx.response_len;
+
+        /* Stray echo/print output — attach as debug info */
+        resp->debug     = ctx.output;
+        resp->debug_len = ctx.output_len;
+    } else {
+        /* No phptoro_respond() call — use raw output (backwards compat) */
+        resp->body     = ctx.output;
+        resp->body_len = ctx.output_len;
+        resp->debug     = NULL;
+        resp->debug_len = 0;
+    }
+
+    /* Cleanup globals */
     SG(server_context)              = NULL;
     SG(request_info).content_type   = NULL;
     SG(request_info).query_string   = NULL;
@@ -435,6 +499,7 @@ int phptoro_php_execute(const phptoro_request *req, phptoro_response *resp) {
 void phptoro_response_free(phptoro_response *resp) {
     if (!resp) return;
     free(resp->body);
+    free(resp->debug);
     for (int i = 0; i < resp->header_count; i++) {
         free(resp->header_names[i]);
         free(resp->header_values[i]);
