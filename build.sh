@@ -335,41 +335,13 @@ if [[ -f "$INSTALL_DIR/lib/libphptoro_ext.a" ]]; then ok "skipping"; else
     ok "libphptoro_ext.a"
 fi
 
-# ── Build Yoga layout engine ────────────────────────────────────────────────
-
-step "phpToro Yoga layout engine (Yoga C++ v3.2.1 + phptoro_yoga)"
-if [[ -f "$INSTALL_DIR/lib/libphptoro_yoga.a" ]]; then ok "skipping"; else
-    YOGA_DIR="$SCRIPT_DIR/ext/yoga"
-    YOGA_FLAGS="-std=c++20 -fno-exceptions -fno-rtti -I$YOGA_DIR/.."
-    YOGA_OBJS=()
-
-    info "compiling Yoga C++..."
-    for src in $(find "$YOGA_DIR" -name "*.cpp"); do
-        obj="$BUILD_DIR/yoga_$(basename "$src" .cpp).o"
-        ${CXX:-c++} $CFLAGS $YOGA_FLAGS -c "$src" -o "$obj"
-        YOGA_OBJS+=("$obj")
-    done
-
-    info "compiling cJSON.c..."
-    ${CC:-cc} $CFLAGS -c "$SCRIPT_DIR/ext/cJSON.c" -o "$BUILD_DIR/cJSON.o"
-    YOGA_OBJS+=("$BUILD_DIR/cJSON.o")
-
-    info "compiling phptoro_yoga.c..."
-    ${CC:-cc} $CFLAGS -I"$SCRIPT_DIR/ext" -I"$YOGA_DIR/.." -c "$SCRIPT_DIR/ext/phptoro_yoga.c" -o "$BUILD_DIR/phptoro_yoga.o"
-    YOGA_OBJS+=("$BUILD_DIR/phptoro_yoga.o")
-
-    info "creating libphptoro_yoga.a..."
-    ${AR:-ar} rcs "$INSTALL_DIR/lib/libphptoro_yoga.a" "${YOGA_OBJS[@]}"
-    ok "libphptoro_yoga.a"
-fi
-
 # ── Package output ───────────────────────────────────────────────────────────
 
 step "Packaging → $OUTPUT_DIR"
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/lib" "$OUTPUT_DIR/include"
 
-for lib in libphp libphptoro_ext libphptoro_yoga libiconv libcharset libxml2 libsqlite3 libssl libcrypto libsodium; do
+for lib in libphp libphptoro_ext libiconv libcharset libxml2 libsqlite3 libssl libcrypto libsodium; do
     [[ -f "$INSTALL_DIR/lib/${lib}.a" ]] && cp "$INSTALL_DIR/lib/${lib}.a" "$OUTPUT_DIR/lib/"
 done
 
@@ -380,8 +352,6 @@ cp -R "$INSTALL_DIR/include/php" "$OUTPUT_DIR/include/"
 cp "$SCRIPT_DIR/ext/phptoro_sapi.h" "$OUTPUT_DIR/include/"
 cp "$SCRIPT_DIR/ext/phptoro_ext.h" "$OUTPUT_DIR/include/"
 cp "$SCRIPT_DIR/ext/phptoro_phpinfo.h" "$OUTPUT_DIR/include/"
-cp "$SCRIPT_DIR/ext/phptoro_yoga.h" "$OUTPUT_DIR/include/"
-cp "$SCRIPT_DIR/ext/cJSON.h" "$OUTPUT_DIR/include/"
 
 # Create archive for GitHub Releases
 ARCHIVE="$SCRIPT_DIR/output/php-$PHP_FULL-$TARGET.tar.gz"
