@@ -159,6 +159,39 @@ static void parse_phpinfo_html(const char *html, size_t html_len, zval *result) 
             current_section = zend_hash_next_index_insert(Z_ARRVAL_P(result), &section);
 
             pos = h2_end + 5;
+
+            /* Capture plain text sections (e.g. PHP License) that have no <table>.
+             * If the next structural tag is another <h2> (or end of doc), not a <table>,
+             * then the content between is plain text belonging to this section. */
+            {
+                const char *next_h2 = strstr(pos, "<h2");
+                const char *next_tbl = strstr(pos, "<table");
+                const char *text_end = NULL;
+
+                if (!next_tbl || (next_h2 && next_h2 < next_tbl)) {
+                    text_end = next_h2 ? next_h2 : end;
+                }
+
+                if (text_end && text_end > pos) {
+                    char *plain = strip_tags(pos, text_end - pos);
+                    if (plain) {
+                        char *trimmed = trim(plain);
+                        free(plain);
+                        if (trimmed && strlen(trimmed) > 10 && current_section) {
+                            zval *rows_zv = zend_hash_str_find(
+                                Z_ARRVAL_P(current_section), "rows", 4);
+                            if (rows_zv && Z_TYPE_P(rows_zv) == IS_ARRAY) {
+                                zval row;
+                                array_init(&row);
+                                add_assoc_string(&row, "key", "");
+                                add_assoc_string(&row, "value", trimmed);
+                                zend_hash_next_index_insert(Z_ARRVAL_P(rows_zv), &row);
+                            }
+                        }
+                        if (trimmed) free(trimmed);
+                    }
+                }
+            }
         } else if (tag_type == 3) {
             /* Parse <tr> row */
             const char *tr_end = strstr(tr_start, "</tr>");
